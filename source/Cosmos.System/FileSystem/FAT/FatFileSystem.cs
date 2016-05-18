@@ -1,114 +1,360 @@
-﻿using System;
+﻿#define COSMOSDEBUG
+
+using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
+
 using Cosmos.Common.Extensions;
-using Cosmos.Debug.Kernel;
 using Cosmos.HAL.BlockDevice;
 using Cosmos.System.FileSystem.FAT.Listing;
 using Cosmos.System.FileSystem.Listing;
-using Directory = Cosmos.System.FileSystem.Listing.Directory;
-using File = Cosmos.System.FileSystem.Listing.File;
 
 namespace Cosmos.System.FileSystem.FAT
 {
-    public class FatFileSystem : FileSystem
+    internal class FatFileSystem : FileSystem
     {
-        readonly public UInt32 BytesPerSector;
-        readonly public UInt32 SectorsPerCluster;
-        readonly public UInt32 BytesPerCluster;
-
-        readonly public UInt32 ReservedSectorCount;
-        readonly public UInt32 TotalSectorCount;
-        readonly public UInt32 ClusterCount;
-
-        readonly public UInt32 NumberOfFATs;
-        readonly public UInt32 FatSectorCount;
-
-        readonly public UInt32 RootSector = 0; // FAT12/16
-        readonly public UInt32 RootSectorCount = 0; // FAT12/16, FAT32 remains 0
-        readonly public UInt32 RootCluster; // FAT32
-        readonly public UInt32 RootEntryCount;
-
-        readonly public UInt32 DataSector; // First Data Sector
-        readonly public UInt32 DataSectorCount;
-
-        public enum FatTypeEnum { Unknown, Fat12, Fat16, Fat32 }
-        readonly public FatTypeEnum FatType = FatTypeEnum.Unknown;
-
-        BlockDevice mDevice;
-
-        public void ReadFatTableSector(UInt64 xSectorNum, byte[] aData)
+        internal class Fat
         {
-            mDevice.ReadBlock(ReservedSectorCount + xSectorNum, 1, aData);
-        }
+            private readonly FatFileSystem mFileSystem;
 
-        public bool FatEntryIsEOF(UInt64 aValue)
-        {
-            if (FatType == FatTypeEnum.Fat12)
-            {
-                return aValue >= 0x0FF8;
-            }
-            else if (FatType == FatTypeEnum.Fat16)
-            {
-                return aValue >= 0xFFF8;
-            }
-            else
-            {
-                return aValue >= 0x0FFFFFF8;
-            }
-        }
+            private readonly ulong mFatSector;
 
-        public UInt64 GetFatEntry(byte[] aSector, UInt64 aClusterNum, UInt64 aOffset)
-        {
-            if (FatType == FatTypeEnum.Fat12)
+            /// <summary>
+            /// Initializes a new instance of the <see cref="Fat"/> class.
+            /// </summary>
+            /// <param name="aFileSystem">The file system.</param>
+            /// <param name="aFatSector">The first sector of the FAT table.</param>
+            public Fat(FatFileSystem aFileSystem, ulong aFatSector)
             {
-                if (aOffset == (BytesPerSector - 1))
+                if (aFileSystem == null)
                 {
-                    throw new Exception("TODO: Sector Span");
-                    /* This cluster access spans a sector boundary in the FAT */
-                    /* There are a number of strategies to handling this. The */
-                    /* easiest is to always load FAT sectors into memory */
-                    /* in pairs if the volume is FAT12 (if you want to load */
-                    /* FAT sector N, you also load FAT sector N+1 immediately */
-                    /* following it in memory unless sector N is the last FAT */
-                    /* sector). It is assumed that this is the strategy used here */
-                    /* which makes this if test for a sector boundary span */
-                    /* unnecessary. */
+                    throw new ArgumentNullException(nameof(aFileSystem));
                 }
-                // We now access the FAT entry as a WORD just as we do for FAT16, but if the cluster number is
-                // EVEN, we only want the low 12-bits of the 16-bits we fetch. If the cluster number is ODD
-                // we want the high 12-bits of the 16-bits we fetch.
-                UInt32 xResult = aSector.ToUInt16(aOffset);
-                if ((aClusterNum & 0x01) == 0)
-                { // Even
-                    return xResult & 0x0FFF;
+
+                mFileSystem = aFileSystem;
+                mFatSector = aFatSector;
+            }
+
+            /// <summary>
+            /// Gets the size of a fat entry in bytes.
+            /// </summary>
+            /// <returns>The size of a fat entry in bytes.</returns>
+            /// <exception cref="NotSupportedException">Can not get the FAT entry size for an unknown FAT type.</exception>
+            private uint GetFatEntrySizeInBytes()
+            {
+                switch (mFileSystem.mFatType)
+                {
+                    case FatTypeEnum.Fat32:
+                        return 4;
+                    case FatTypeEnum.Fat16:
+                        return 2;
+                    case FatTypeEnum.Fat12:
+                        // TODO:
+                        break;
                 }
-                else
-                { // Odd
-                    return xResult >> 4;
+
+                throw new NotSupportedException("Can not get the FAT entry size for an unknown FAT type.");
+            }
+
+            /// <summary>
+            /// Gets the fat chain.
+            /// </summary>
+            /// <param name="aFirstEntry">The first entry.</param>
+            /// <param name="aDataSize">Size of a data to be stored in bytes.</param>
+            /// <returns>An array of cluster numbers for the fat chain.</returns>
+            /// <exception cref="ArgumentOutOfRangeException"></exception>
+            public ulong[] GetFatChain(ulong aFirstEntry, uint aDataSize = 0)
+            {
+                Global.mFileSystemDebugger.SendInternal("-- Fat.GetFatChain --");
+                Global.mFileSystemDebugger.SendInternal("aFirstEntry =");
+                Global.mFileSystemDebugger.SendInternal(aFirstEntry);
+                Global.mFileSystemDebugger.SendInternal("aDataSize =");
+                Global.mFileSystemDebugger.SendInternal(aDataSize);
+
+                var xReturn = new ulong[0];
+                ulong xCurrentEntry = aFirstEntry;
+                ulong xValue;
+
+                uint xEntriesRequired = aDataSize / mFileSystem.BytesPerCluster;
+                if (aDataSize % mFileSystem.BytesPerCluster != 0)
+                {
+                    xEntriesRequired++;
+                }
+
+                GetFatEntry(xCurrentEntry, out xValue);
+                Array.Resize(ref xReturn, xReturn.Length + 1);
+                xReturn[xReturn.Length - 1] = xCurrentEntry;
+
+                while (!FatEntryIsEof(xValue))
+                {
+                    xCurrentEntry = xValue;
+                    GetFatEntry(xCurrentEntry, out xValue);
+                    Array.Resize(ref xReturn, xReturn.Length + 1);
+                    if (!FatEntryIsEof(xValue))
+                    {
+                        xReturn[xReturn.Length - 1] = xValue;
+                    }
+                    else
+                    {
+                        xReturn[xReturn.Length - 1] = xCurrentEntry;
+                    }
+                }
+
+                if (xEntriesRequired > xReturn.Length)
+                {
+                    ulong xNewClusters = (uint)xReturn.Length - xEntriesRequired;
+                    for (ulong i = 0; i < xNewClusters; i++)
+                    {
+                        xCurrentEntry = GetNextUnallocatedFatEntry();
+                        ulong xLastFatEntry = xReturn[xReturn.Length - 1];
+                        SetFatEntry(xLastFatEntry, xCurrentEntry);
+                        Array.Resize(ref xReturn, xReturn.Length + 1);
+                        xReturn[xReturn.Length - 1] = xCurrentEntry;
+                    }
+                }
+
+                SetFatEntry(xCurrentEntry, FatEntryEofValue());
+
+                return xReturn;
+            }
+
+            /// <summary>
+            /// Gets the next unallocated fat entry.
+            /// </summary>
+            /// <returns>The index of the next unallocated FAT entry.</returns>
+            /// <exception cref="Exception">Failed to find an unallocated FAT entry.</exception>
+            public uint GetNextUnallocatedFatEntry()
+            {
+                Global.mFileSystemDebugger.SendInternal("-- Fat.GetNextUnallocatedFatEntry --");
+
+                uint xTotalEntries = mFileSystem.FatSectorCount*mFileSystem.BytesPerSector/GetFatEntrySizeInBytes();
+                for (uint i = mFileSystem.RootCluster; i < xTotalEntries; i++)
+                {
+                    ulong xEntryValue;
+                    GetFatEntry(i, out xEntryValue);
+                    if (!FatEntryIsEof(xEntryValue))
+                    {
+                        Global.mFileSystemDebugger.SendInternal("i =");
+                        Global.mFileSystemDebugger.SendInternal(i);
+                        SetFatEntry(i, FatEntryEofValue());
+                        return i;
+                    }
+                }
+
+                throw new Exception("Failed to find an unallocated FAT entry.");
+            }
+
+            private void ReadFatSector(ulong aSector, out byte[] aData)
+            {
+                aData = mFileSystem.NewBlockArray();
+                var xSector = mFatSector + aSector;
+                Global.mFileSystemDebugger.SendInternal("xSector  =");
+                Global.mFileSystemDebugger.SendInternal(xSector);
+                mFileSystem.mDevice.ReadBlock(xSector, mFileSystem.SectorsPerCluster, aData);
+            }
+
+            private void WriteFatSector(ulong aSector, byte[] aData)
+            {
+                if (aData == null)
+                {
+                    throw new ArgumentNullException(nameof(aData));
+                }
+
+                var xSector = mFatSector + aSector;
+                mFileSystem.mDevice.WriteBlock(xSector, mFileSystem.SectorsPerCluster, aData);
+            }
+
+            /// <summary>
+            /// Gets a fat entry.
+            /// </summary>
+            /// <param name="aEntryNumber">The entry number.</param>
+            /// <param name="aValue">The entry value.</param>
+            private void GetFatEntry(ulong aEntryNumber, out ulong aValue)
+            {
+                Global.mFileSystemDebugger.SendInternal("-- Fat.GetFatEntry --");
+                Global.mFileSystemDebugger.SendInternal("aEntryNumber =");
+                Global.mFileSystemDebugger.SendInternal(aEntryNumber);
+
+                uint xEntrySize = GetFatEntrySizeInBytes();
+                ulong xEntryOffset = aEntryNumber * xEntrySize;
+                Global.mFileSystemDebugger.SendInternal("xEntrySize =");
+                Global.mFileSystemDebugger.SendInternal(xEntrySize);
+                Global.mFileSystemDebugger.SendInternal("xEntryOffset =");
+                Global.mFileSystemDebugger.SendInternal(xEntryOffset);
+
+                ulong xSector = xEntryOffset/mFileSystem.BytesPerSector;
+                ulong xSectorOffset = (xSector*mFileSystem.BytesPerSector) - xEntryOffset;
+                Global.mFileSystemDebugger.SendInternal("xSector =");
+                Global.mFileSystemDebugger.SendInternal(xSector);
+
+
+                byte[] xData = mFileSystem.NewBlockArray();
+                ReadFatSector(xSector, out xData);
+
+                switch (mFileSystem.mFatType)
+                {
+                    case FatTypeEnum.Fat12:
+                        // We now access the FAT entry as a WORD just as we do for FAT16, but if the cluster number is
+                        // EVEN, we only want the low 12-bits of the 16-bits we fetch. If the cluster number is ODD
+                        // we want the high 12-bits of the 16-bits we fetch.
+                        uint xResult = xData.ToUInt16(xEntryOffset);
+                        if ((aEntryNumber & 0x01) == 0)
+                        {
+                            aValue = xResult & 0x0FFF; // Even
+                        }
+                        else
+                        {
+                            aValue = xResult >> 4; // Odd
+                        }
+                        break;
+                    case FatTypeEnum.Fat16:
+                        aValue = xData.ToUInt16(xEntryOffset);
+                        break;
+                    case FatTypeEnum.Fat32:
+                        aValue = xData.ToUInt32(xEntryOffset) & 0x0FFFFFFF;
+                        break;
+                    default:
+                        throw new NotSupportedException("Unknown FAT type.");
+                }
+                Global.mFileSystemDebugger.SendInternal("aValue =");
+                Global.mFileSystemDebugger.SendInternal(aValue);
+            }
+
+            /// <summary>
+            /// Sets a fat entry.
+            /// </summary>
+            /// <param name="aEntryNumber"></param>
+            /// <param name="aValue">The value.</param>
+            private void SetFatEntry(ulong aEntryNumber, ulong aValue)
+            {
+                Global.mFileSystemDebugger.SendInternal("--- Fat.SetFatEntry ---");
+                Global.mFileSystemDebugger.SendInternal("aEntryNumber =");
+                Global.mFileSystemDebugger.SendInternal(aEntryNumber);
+
+                uint xEntrySize = GetFatEntrySizeInBytes();
+                ulong xEntryOffset = aEntryNumber*xEntrySize;
+
+                ulong xSector = xEntryOffset/mFileSystem.BytesPerSector;
+                ulong xSectorOffset = (xSector*mFileSystem.BytesPerSector) - xEntryOffset;
+
+                byte[] xData = mFileSystem.NewBlockArray();
+                ReadFatSector(xSector, out xData);
+
+                switch (mFileSystem.mFatType)
+                {
+                    case FatTypeEnum.Fat12:
+                        xData.SetUInt16(xEntryOffset, (ushort) aValue);
+                        break;
+                    case FatTypeEnum.Fat16:
+                        xData.SetUInt16(xEntryOffset, (ushort) aValue);
+                        break;
+                    case FatTypeEnum.Fat32:
+                        xData.SetUInt32(xEntryOffset, (uint) aValue);
+                        break;
+                    default:
+                        throw new NotSupportedException("Unknown FAT type.");
+                }
+
+                WriteFatSector(xSector, xData);
+            }
+
+            /// <summary>
+            /// Is the FAT entry EOF?
+            /// </summary>
+            /// <param name="aValue">The entry index.</param>
+            /// <returns></returns>
+            /// <exception cref="Exception">Unknown file system type.</exception>
+            private bool FatEntryIsEof(ulong aValue)
+            {
+                switch (mFileSystem.mFatType)
+                {
+                    case FatTypeEnum.Fat12:
+                        return aValue >= 0xFF8;
+                    case FatTypeEnum.Fat16:
+                        return aValue >= 0xFFF8;
+                    case FatTypeEnum.Fat32:
+                        return aValue >= 0xFFFFFF8;
+                    default:
+                        throw new Exception("Unknown file system type.");
                 }
             }
-            else if (FatType == FatTypeEnum.Fat16)
+
+            /// <summary>
+            /// The the EOF value for a specific FAT type.
+            /// </summary>
+            /// <returns>The EOF value.</returns>
+            /// <exception cref="Exception">Unknown file system type.</exception>
+            private ulong FatEntryEofValue()
             {
-                return aSector.ToUInt16(aOffset);
-            }
-            else
-            {
-                return aSector.ToUInt32(aOffset) & 0x0FFFFFFF;
+                switch (mFileSystem.mFatType)
+                {
+                    case FatTypeEnum.Fat12:
+                        return 0x0FFF;
+                    case FatTypeEnum.Fat16:
+                        return 0xFFFF;
+                    case FatTypeEnum.Fat32:
+                        return 0x0FFFFFFF;
+                    default:
+                        throw new Exception("Unknown file system type.");
+                }
             }
         }
 
-        public FatFileSystem(BlockDevice aDevice)
-        {
+        public readonly uint BytesPerCluster;
 
-            mDevice = aDevice;
-            byte[] xBPB = mDevice.NewBlockArray(1);
+        public readonly uint BytesPerSector;
+
+        public readonly uint ClusterCount;
+
+        public readonly uint DataSector; // First Data Sector
+
+        public readonly uint DataSectorCount;
+
+        public readonly uint FatSectorCount;
+
+        private readonly FatTypeEnum mFatType;
+
+        public readonly uint NumberOfFATs;
+
+        public readonly uint ReservedSectorCount;
+
+        public readonly uint RootCluster; // FAT32
+
+        public readonly uint RootEntryCount;
+
+        public readonly uint RootSector; // FAT12/16
+
+        public readonly uint RootSectorCount; // FAT12/16, FAT32 remains 0
+
+        public readonly uint SectorsPerCluster;
+
+        public readonly uint TotalSectorCount;
+
+        private readonly Fat[] mFats;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="FatFileSystem"/> class.
+        /// </summary>
+        /// <param name="aDevice">The partition.</param>
+        /// <param name="aRootPath">The root path.</param>
+        /// <exception cref="Exception">FAT signature not found.</exception>
+        public FatFileSystem(Partition aDevice, string aRootPath)
+            : base(aDevice, aRootPath)
+        {
+            if (aDevice == null)
+            {
+                throw new ArgumentNullException(nameof(aDevice));
+            }
+
+            if (string.IsNullOrEmpty(aRootPath))
+            {
+                throw new ArgumentException("Argument is null or empty", nameof(aRootPath));
+            }
+
+            var xBPB = mDevice.NewBlockArray(1);
 
             mDevice.ReadBlock(0UL, 1U, xBPB);
 
-            UInt16 xSig = xBPB.ToUInt16(510);
+            ushort xSig = xBPB.ToUInt16(510);
             if (xSig != 0xAA55)
             {
                 throw new Exception("FAT signature not found.");
@@ -133,9 +379,9 @@ namespace Cosmos.System.FileSystem.FAT
             {
                 FatSectorCount = xBPB.ToUInt32(36);
             }
-            //Global.Dbg.Send("FAT Sector Count: " + FatSectorCount);
 
-            DataSectorCount = TotalSectorCount - (ReservedSectorCount + (NumberOfFATs * FatSectorCount) + ReservedSectorCount);
+            DataSectorCount = TotalSectorCount -
+                              (ReservedSectorCount + NumberOfFATs * FatSectorCount + ReservedSectorCount);
 
             // Computation rounds down.
             ClusterCount = DataSectorCount / SectorsPerCluster;
@@ -145,258 +391,107 @@ namespace Cosmos.System.FileSystem.FAT
             // FAT16 starts at 4085, FAT32 starts at 65525
             if (ClusterCount < 4085)
             {
-                FatType = FatTypeEnum.Fat12;
+                mFatType = FatTypeEnum.Fat12;
             }
             else if (ClusterCount < 65525)
             {
-                FatType = FatTypeEnum.Fat16;
+                mFatType = FatTypeEnum.Fat16;
             }
             else
             {
-                FatType = FatTypeEnum.Fat32;
+                mFatType = FatTypeEnum.Fat32;
             }
 
-            if (FatType == FatTypeEnum.Fat32)
+            if (mFatType == FatTypeEnum.Fat32)
             {
                 RootCluster = xBPB.ToUInt32(44);
             }
             else
             {
-                RootSector = ReservedSectorCount + (NumberOfFATs * FatSectorCount);
+                RootSector = ReservedSectorCount + NumberOfFATs * FatSectorCount;
                 RootSectorCount = (RootEntryCount * 32 + (BytesPerSector - 1)) / BytesPerSector;
             }
-            DataSector = ReservedSectorCount + (NumberOfFATs * FatSectorCount) + RootSectorCount;
+            DataSector = ReservedSectorCount + NumberOfFATs * FatSectorCount + RootSectorCount;
 
+            mFats = new Fat[NumberOfFATs];
+            for (ulong i = 0; i < NumberOfFATs; i++)
+            {
+                mFats[i] = new Fat(this, (ReservedSectorCount + i * FatSectorCount));
+            }
         }
 
-        public byte[] NewClusterArray()
+        internal Fat GetFat(int aTableNumber)
+        {
+            if (mFats.Length > aTableNumber)
+            {
+                return mFats[aTableNumber];
+            }
+
+            throw new Exception("The fat table number doesn't exist.");
+        }
+
+        internal byte[] NewBlockArray()
         {
             return new byte[BytesPerCluster];
         }
 
-        public void ReadCluster(UInt64 aCluster, byte[] aData)
+        internal void Read(ulong aCluster, out byte[] aData, ulong aSize = 0, ulong aOffset = 0)
         {
-            UInt64 xSector = DataSector + ((aCluster - 2) * SectorsPerCluster);
-            mDevice.ReadBlock(xSector, SectorsPerCluster, aData);
-        }
-
-        public void WriteCluster(UInt64 aCluster, byte[] aData)
-        {
-            UInt64 xSector = DataSector + ((aCluster - 2) * SectorsPerCluster);
-            mDevice.WriteBlock(xSector, SectorsPerCluster, aData);
-        }
-
-        public void GetFatTableSector(UInt64 aClusterNum, out UInt32 oSector, out UInt32 oOffset)
-        {
-            UInt64 xOffset = 0;
-            if (FatType == FatTypeEnum.Fat12)
+            if (aSize == 0)
             {
-                // Multiply by 1.5 without using floating point, the divide by 2 rounds DOWN
-                xOffset = aClusterNum + (aClusterNum / 2);
-            }
-            else if (FatType == FatTypeEnum.Fat16)
-            {
-                xOffset = aClusterNum * 2;
-            }
-            else if (FatType == FatTypeEnum.Fat32)
-            {
-                xOffset = aClusterNum * 4;
-            }
-            oSector = (UInt32)(xOffset / BytesPerSector);
-            oOffset = (UInt32)(xOffset % BytesPerSector);
-        }
-
-        public List<Base> GetRoot()
-        {
-            var xRootDirectory = GetRootDirectory(null);
-            return GetDirectoryListing(xRootDirectory);
-        }
-
-        private List<Base> GetDirectoryContents(FatDirectory directory, Stream directoryContents)
-        {
-            if (directory == null)
-            {
-                throw new ArgumentNullException("directory");
+                aSize = BytesPerCluster;
             }
 
-            FatHelpers.Debug("--GetDirectoryContents");
-            if (directoryContents == null)
+            if (mFatType == FatTypeEnum.Fat32)
             {
-                FatHelpers.Debug("No Stream specified!");
+                aData = NewBlockArray();
+                ulong xSector = DataSector + (aCluster - RootCluster) * SectorsPerCluster;
+                mDevice.ReadBlock(xSector, SectorsPerCluster, aData);
             }
             else
             {
-                FatHelpers.Debug("Stream specified.");
+                aData = mDevice.NewBlockArray(1);
+                mDevice.ReadBlock(aCluster, RootSectorCount, aData);
+            }
+        }
+
+        internal void Write(ulong aCluster, byte[] aData, ulong aSize = 0, ulong aOffset = 0)
+        {
+            if (aData == null)
+            {
+                throw new ArgumentNullException(nameof(aData));
             }
 
-            var xResult = new List<Base>();
-            //TODO: Change xLongName to StringBuilder
-            string xLongName = "";
-            string xName = "";
-            var xBuff = new byte[32];
-            FatHelpers.Debug("Stream.Position");
-            FatHelpers.DebugNumber((uint) directoryContents.Position);
-            FatHelpers.Debug("Stream.Length");
-            FatHelpers.DebugNumber((uint) directoryContents.Length);
-
-            if (directoryContents.Position < directoryContents.Length)
+            if (aSize == 0)
             {
-                FatHelpers.Debug("Data to read!");
+                aSize = BytesPerCluster;
+            }
+
+            byte[] xTempData;
+            Read(aCluster, out xTempData);
+            Array.Copy(aData, 0, xTempData, (long)aOffset, aData.Length);
+
+            if (mFatType == FatTypeEnum.Fat32)
+            {
+                ulong xSector = DataSector + (aCluster - RootCluster) * SectorsPerCluster;
+                mDevice.WriteBlock(xSector, SectorsPerCluster, aData);
             }
             else
             {
-                FatHelpers.Debug("No data to read!");
+                mDevice.WriteBlock(aCluster, RootSectorCount, aData);
             }
-
-            while (directoryContents.Position < directoryContents.Length)
-            {
-                if (directoryContents.Read(xBuff, 0, 32) != 32)
-                {
-                    FatHelpers.Debug("Not enough data read!");
-                    throw new Exception("Unable to read 32 bytes from stream!");
-                }
-                FatHelpers.Debug("No data read");
-                FatHelpers.DevDebug("-------------------------------------------------");
-                byte xAttrib = xBuff[11];
-                byte xStatus = xBuff[0];
-
-                FatHelpers.DevDebug("Attrib = " + xAttrib.ToString() + ", Status = " + xStatus);
-                if (xAttrib == DirectoryEntryAttributeConsts.LongName)
-                {
-                    byte xType = xBuff[12];
-                    byte xOrd = xBuff[0];
-                    FatHelpers.DevDebug("Reading LFN with Seqnr " + xOrd.ToString() + ", Type = " + xType);
-                    if (xOrd == 0xE5)
-                    {
-                        FatHelpers.DevDebug("Skipping deleted entry");
-                        continue;
-                    }
-                    if (xType == 0)
-                    {
-                        if ((xOrd & 0x40) > 0)
-                        {
-                            xLongName = "";
-                        }
-                        //TODO: Check LDIR_Ord for ordering and throw exception
-                        // if entries are found out of order.
-                        // Also save buffer and only copy name if a end Ord marker is found.
-                        string xLongPart = xBuff.GetUtf16String(0 + 1, 5);
-                        // We have to check the length because 0xFFFF is a valid Unicode codepoint.
-                        // So we only want to stop if the 0xFFFF is AFTER a 0x0000. We can determin
-                        // this by also looking at the length. Since we short circuit the or, the length
-                        // is rarely evaluated.
-                        if (xBuff.ToUInt16(0 + 14) != 0xFFFF || xLongPart.Length == 5)
-                        {
-                            xLongPart = xLongPart + xBuff.GetUtf16String(0 + 14, 6);
-                            if (xBuff.ToUInt16(0 + 28) != 0xFFFF || xLongPart.Length == 11)
-                            {
-                                xLongPart = xLongPart + xBuff.GetUtf16String(0 + 28, 2);
-                            }
-                        }
-                        xLongName = xLongPart + xLongName;
-                        xLongPart = null;
-                        //TODO: LDIR_Chksum
-                    }
-                }
-                else
-                {
-                    xName = xLongName;
-                    if (xStatus == 0x00)
-                    {
-                        // Empty slot, and no more entries after this
-                        break;
-                    }
-                    else if (xStatus == 0x05)
-                    {
-                        // Japanese characters - We dont handle these
-                    }
-                    else if (xStatus == 0xE5)
-                    {
-                        // Empty slot, skip it
-                    }
-                    else if (xStatus >= 0x20)
-                    {
-                        if (xLongName.Length > 0)
-                        {
-                            // Leading and trailing spaces are to be ignored according to spec.
-                            // Many programs (including Windows) pad trailing spaces although it
-                            // it is not required for long names.
-                            // As per spec, ignore trailing periods
-                            xName = xLongName.Trim();
-
-                            //If there are trailing periods
-                            int nameIndex = xName.Length - 1;
-                            if (xName[nameIndex] == '.')
-                            {
-                                //Search backwards till we find the first non-period character
-                                for (; nameIndex > 0; nameIndex--)
-                                {
-                                    if (xName[nameIndex] != '.')
-                                    {
-                                        break;
-                                    }
-                                }
-                                //Substring to remove the periods
-                                xName = xName.Substring(0, nameIndex + 1);
-                            }
-                            xLongName = "";
-                        }
-                        else
-                        {
-                            string xEntry = xBuff.GetAsciiString(0, 11);
-                            xName = xEntry.Substring(0, 8).TrimEnd();
-                            string xExt = xEntry.Substring(8, 3).TrimEnd();
-                            if (xExt.Length > 0)
-                            {
-                                xName = xName + "." + xExt;
-                            }
-                        }
-                    }
-                }
-                UInt32 xFirstCluster = (UInt32)(xBuff.ToUInt16(0 + 20) << 16 | xBuff.ToUInt16(0 + 26));
-
-                var xTest = xAttrib & (DirectoryEntryAttributeConsts.Directory | DirectoryEntryAttributeConsts.VolumeID);
-                if (xAttrib == DirectoryEntryAttributeConsts.LongName)
-                {
-                    // skip adding, as it's a LongFileName entry, meaning the next normal entry is the item with the name.
-                    FatHelpers.Debug("Entry was an Long FileName entry. Current LongName = '" + xLongName + "'");
-                }
-                else if (xTest == 0)
-                {
-                    UInt32 xSize = xBuff.ToUInt32(0 + 28);
-                    if (xSize == 0 && xName.Length == 0)
-                    {
-                        continue;
-                    }
-                    xResult.Add(new FatFile(this, xName, xSize, xFirstCluster, directory));
-                    FatHelpers.Debug("Returning file '" + xName + "'");
-                }
-                else if (xTest == DirectoryEntryAttributeConsts.Directory)
-                {
-                    UInt32 xSize = xBuff.ToUInt32(0 + 28);
-                    var xFatDirectory = new FatDirectory(this, xName, xFirstCluster, directory, xSize);
-                    FatHelpers.Debug("Returning directory '" + xFatDirectory.Name + "', FirstCluster = " + xFirstCluster);
-                    xResult.Add(xFatDirectory);
-                }
-                else if (xTest == DirectoryEntryAttributeConsts.VolumeID)
-                {
-                    FatHelpers.DevDebug("Directory entry is VolumeID");
-                    //
-                }
-                else
-                {
-                    FatHelpers.DevDebug("Not sure what to do!");
-                }
-            }
-
-            return xResult;
         }
 
-        public static bool IsDeviceFAT(Partition aDevice)
+        public static bool IsDeviceFat(Partition aDevice)
         {
-            byte[] xBPB = aDevice.NewBlockArray(1);
+            if (aDevice == null)
+            {
+                throw new ArgumentNullException(nameof(aDevice));
+            }
+
+            var xBPB = aDevice.NewBlockArray(1);
             aDevice.ReadBlock(0UL, 1U, xBPB);
-            UInt16 xSig = xBPB.ToUInt16(510);
+            ushort xSig = xBPB.ToUInt16(510);
             if (xSig != 0xAA55)
             {
                 return false;
@@ -404,238 +499,140 @@ namespace Cosmos.System.FileSystem.FAT
             return true;
         }
 
-        public override List<Base> GetDirectoryListing(Directory baseDirectory)
+        public override void DisplayFileSystemInfo()
         {
+            global::System.Console.WriteLine("-------File System--------");
+            global::System.Console.WriteLine("Bytes per Cluster     = " + BytesPerCluster);
+            global::System.Console.WriteLine("Bytes per Sector      = " + BytesPerSector);
+            global::System.Console.WriteLine("Cluster Count         = " + ClusterCount);
+            global::System.Console.WriteLine("Data Sector           = " + DataSector);
+            global::System.Console.WriteLine("Data Sector Count     = " + DataSectorCount);
+            global::System.Console.WriteLine("FAT Sector Count      = " + FatSectorCount);
+            global::System.Console.WriteLine("FAT Type              = " + (uint)mFatType);
+            global::System.Console.WriteLine("Number of FATS        = " + NumberOfFATs);
+            global::System.Console.WriteLine("Reserved Sector Count = " + ReservedSectorCount);
+            global::System.Console.WriteLine("Root Cluster          = " + RootCluster);
+            global::System.Console.WriteLine("Root Entry Count      = " + RootEntryCount);
+            global::System.Console.WriteLine("Root Sector           = " + RootSector);
+            global::System.Console.WriteLine("Root Sector Count     = " + RootSectorCount);
+            global::System.Console.WriteLine("Sectors per Cluster   = " + SectorsPerCluster);
+            global::System.Console.WriteLine("Total Sector Count    = " + TotalSectorCount);
+
+            Global.mFileSystemDebugger.SendInternal("Bytes per Cluster =");
+            Global.mFileSystemDebugger.SendInternal(BytesPerCluster);
+            Global.mFileSystemDebugger.SendInternal("Bytes per Sector =");
+            Global.mFileSystemDebugger.SendInternal(BytesPerSector);
+            Global.mFileSystemDebugger.SendInternal("Cluster Count =");
+            Global.mFileSystemDebugger.SendInternal(ClusterCount);
+            Global.mFileSystemDebugger.SendInternal("Data Sector =");
+            Global.mFileSystemDebugger.SendInternal(DataSector);
+            Global.mFileSystemDebugger.SendInternal("Data Sector Count =");
+            Global.mFileSystemDebugger.SendInternal(DataSectorCount);
+            Global.mFileSystemDebugger.SendInternal("FAT Sector Count =");
+            Global.mFileSystemDebugger.SendInternal(FatSectorCount);
+            Global.mFileSystemDebugger.SendInternal("FAT Type =");
+            Global.mFileSystemDebugger.SendInternal((uint)mFatType);
+            Global.mFileSystemDebugger.SendInternal("Number of FATS =");
+            Global.mFileSystemDebugger.SendInternal(NumberOfFATs);
+            Global.mFileSystemDebugger.SendInternal("Reserved Sector Count =");
+            Global.mFileSystemDebugger.SendInternal(ReservedSectorCount);
+            Global.mFileSystemDebugger.SendInternal("Root Cluster =");
+            Global.mFileSystemDebugger.SendInternal(RootCluster);
+            Global.mFileSystemDebugger.SendInternal("Root Entry Count =");
+            Global.mFileSystemDebugger.SendInternal(RootEntryCount);
+            Global.mFileSystemDebugger.SendInternal("Root Sector =");
+            Global.mFileSystemDebugger.SendInternal(RootSector);
+            Global.mFileSystemDebugger.SendInternal("Root Sector Count =");
+            Global.mFileSystemDebugger.SendInternal(RootSectorCount);
+            Global.mFileSystemDebugger.SendInternal("Sectors per Cluster =");
+            Global.mFileSystemDebugger.SendInternal(SectorsPerCluster);
+            Global.mFileSystemDebugger.SendInternal("Total Sector Count =");
+            Global.mFileSystemDebugger.SendInternal(TotalSectorCount);
+        }
+
+        public override List<DirectoryEntry> GetDirectoryListing(DirectoryEntry baseDirectory)
+        {
+            Global.mFileSystemDebugger.SendInternal("-- FatFileSystem.GetDirectoryListing --");
+
             if (baseDirectory == null)
             {
-                baseDirectory = GetRootDirectory(null);
+                throw new ArgumentNullException(nameof(baseDirectory));
             }
 
-            using (var xStream = new FatDirectoryStream((FatDirectory)baseDirectory))
-            //using(var xStream = new TestFatDirectoryStream((FatDirectory)baseDirectory))
+            var result = new List<DirectoryEntry>();
+            var xEntry = (FatDirectoryEntry)baseDirectory;
+            var fatListing = xEntry.ReadDirectoryContents();
+
+            for (int i = 0; i < fatListing.Count; i++)
             {
-                return GetDirectoryContents((FatDirectory) baseDirectory, xStream);
+                result.Add(fatListing[i]);
             }
+            return result;
         }
 
-        public override Directory GetRootDirectory(string name)
+        public override DirectoryEntry GetRootDirectory()
         {
-            ulong xSize;
-            if (FatType == FatTypeEnum.Fat32)
-            {
-                xSize = BytesPerCluster;
-            }
-            else
-            {
-                throw new Exception("Root directory size calculation not implemented!");
-            }
-            return new FatDirectory(this, name, RootCluster, null, xSize);
+            Global.mFileSystemDebugger.SendInternal("-- FatFileSystem.GetRootDirectory --");
+
+            var xRootEntry = new FatDirectoryEntry(this, null, mRootPath, mRootPath, RootCluster);
+            return xRootEntry;
         }
 
-        public override Stream GetFileStream(File fileInfo)
+        public override DirectoryEntry CreateDirectory(DirectoryEntry aParentDirectory, string aNewDirectory)
         {
-            return new FatFileStream((FatFile)fileInfo);
-        }
+            Global.mFileSystemDebugger.SendInternal("-- FatFileSystem.CreateDirectory --");
+            Global.mFileSystemDebugger.SendInternal("aParentDirectory.Name =");
+            Global.mFileSystemDebugger.SendInternal(aParentDirectory?.mName);
+            Global.mFileSystemDebugger.SendInternal("aNewDirectory =");
+            Global.mFileSystemDebugger.SendInternal(aNewDirectory);
 
-        public void SetDirectoryLength(FatDirectory file, long value)
-        {
-            throw new NotImplementedException("Changing directory length not yet implemented!");
-        }
-
-        public void SetFileLength(Base file, long value)
-        {
-            if (file == null)
+            if (aParentDirectory == null)
             {
-                throw new ArgumentNullException(nameof(file));
+                throw new ArgumentNullException(nameof(aParentDirectory));
             }
 
-            FatHelpers.Debug("File.Name:");
-            FatHelpers.Debug(file.Name);
-
-            var xIsFile = file is FatFile;
-            var xIsDirectory = !xIsFile;
-
-            using (var xDirectoryContents = new FatDirectoryStream((FatDirectory) file.BaseDirectory))
+            if (string.IsNullOrEmpty(aNewDirectory))
             {
-                FatHelpers.Debug("--SetFileLength");
-                FatHelpers.DebugNumber((uint)xDirectoryContents.Length);
-
-                //TODO: Change xLongName to StringBuilder
-                string xLongName = "";
-                string xName = "";
-                var xBuff = new byte[32];
-                while (xDirectoryContents.Position < xDirectoryContents.Length)
-                {
-                    if (xDirectoryContents.Read(xBuff, 0, 32) != 32)
-                    {
-                        throw new Exception("Unable to read 32 bytes from stream!");
-                    }
-                    FatHelpers.DevDebug("-------------------------------------------------");
-                    byte xAttrib = xBuff[11];
-                    byte xStatus = xBuff[0];
-
-                    FatHelpers.DevDebug("Attrib = " + xAttrib.ToString() + ", Status = " + xStatus);
-                    if (xAttrib == DirectoryEntryAttributeConsts.LongName)
-                    {
-                        byte xType = xBuff[12];
-                        byte xOrd = xBuff[0];
-                        FatHelpers.DevDebug("Reading LFN with Seqnr " + xOrd.ToString() + ", Type = " + xType);
-                        if (xOrd == 0xE5)
-                        {
-                            FatHelpers.DevDebug("Skipping deleted entry");
-                            continue;
-                        }
-                        if (xType == 0)
-                        {
-                            if ((xOrd & 0x40) > 0)
-                            {
-                                xLongName = "";
-                            }
-                            //TODO: Check LDIR_Ord for ordering and throw exception
-                            // if entries are found out of order.
-                            // Also save buffer and only copy name if a end Ord marker is found.
-                            string xLongPart = xBuff.GetUtf16String(0 + 1, 5);
-                            // We have to check the length because 0xFFFF is a valid Unicode codepoint.
-                            // So we only want to stop if the 0xFFFF is AFTER a 0x0000. We can determin
-                            // this by also looking at the length. Since we short circuit the or, the length
-                            // is rarely evaluated.
-                            if (xBuff.ToUInt16(0 + 14) != 0xFFFF || xLongPart.Length == 5)
-                            {
-                                xLongPart = xLongPart + xBuff.GetUtf16String(0 + 14, 6);
-                                if (xBuff.ToUInt16(0 + 28) != 0xFFFF || xLongPart.Length == 11)
-                                {
-                                    xLongPart = xLongPart + xBuff.GetUtf16String(0 + 28, 2);
-                                }
-                            }
-                            xLongName = xLongPart + xLongName;
-                            xLongPart = null;
-                            //TODO: LDIR_Chksum
-                        }
-                    }
-                    else
-                    {
-                        xName = xLongName;
-                        if (xStatus == 0x00)
-                        {
-                            // Empty slot, and no more entries after this
-                            break;
-                        }
-                        else if (xStatus == 0x05)
-                        {
-                            // Japanese characters - We dont handle these
-                        }
-                        else if (xStatus == 0xE5)
-                        {
-                            // Empty slot, skip it
-                        }
-                        else if (xStatus >= 0x20)
-                        {
-                            if (xLongName.Length > 0)
-                            {
-                                // Leading and trailing spaces are to be ignored according to spec.
-                                // Many programs (including Windows) pad trailing spaces although it
-                                // it is not required for long names.
-                                // As per spec, ignore trailing periods
-                                xName = xLongName.Trim();
-
-                                //If there are trailing periods
-                                int nameIndex = xName.Length - 1;
-                                if (xName[nameIndex] == '.')
-                                {
-                                    //Search backwards till we find the first non-period character
-                                    for (; nameIndex > 0; nameIndex--)
-                                    {
-                                        if (xName[nameIndex] != '.')
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    //Substring to remove the periods
-                                    xName = xName.Substring(0, nameIndex + 1);
-                                }
-                                xLongName = "";
-                            }
-                            else
-                            {
-                                string xEntry = xBuff.GetAsciiString(0, 11);
-                                xName = xEntry.Substring(0, 8).TrimEnd();
-                                string xExt = xEntry.Substring(8, 3).TrimEnd();
-                                if (xExt.Length > 0)
-                                {
-                                    xName = xName + "." + xExt;
-                                }
-                            }
-                        }
-                    }
-                    UInt32 xFirstCluster = (UInt32)(xBuff.ToUInt16(0 + 20) << 16 | xBuff.ToUInt16(0 + 26));
-
-                    var xTest = xAttrib & (DirectoryEntryAttributeConsts.Directory | DirectoryEntryAttributeConsts.VolumeID);
-                    if (xAttrib == DirectoryEntryAttributeConsts.LongName)
-                    {
-                        // skip adding, as it's a LongFileName entry, meaning the next normal entry is the item with the name.
-                        FatHelpers.Debug("Entry was an Long FileName entry. Current LongName = '" + xLongName + "'");
-                    }
-                    else if (xTest == 0)
-                    {
-                        if (xIsFile && String.Equals(file.Name, xName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            // found, now update size and write back
-                            xBuff.SetUInt32(28, (uint) value);
-                            xDirectoryContents.Position -= 32;
-                            xDirectoryContents.Write(xBuff, 0, 32);
-                            FatHelpers.Debug("--- File size changed!");
-                            return;
-                        }
-                    }
-                    else if (xTest == DirectoryEntryAttributeConsts.Directory)
-                    {
-                        if (xIsDirectory && String.Equals(file.Name, xName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            xBuff.SetUInt32(28, (uint)value);
-                            xDirectoryContents.Position -= 32;
-                            xDirectoryContents.Write(xBuff, 0, 32);
-                            FatHelpers.Debug("--- Directory size changed!");
-                            return;
-                        }
-                    }
-                    else if (xTest == DirectoryEntryAttributeConsts.VolumeID)
-                    {
-                        FatHelpers.DevDebug("Directory entry is VolumeID");
-                        //
-                    }
-                    else
-                    {
-                        FatHelpers.DevDebug("Not sure what to do!");
-                    }
-                }
+                throw new ArgumentNullException(nameof(aNewDirectory));
             }
-            throw new Exception("Unable to find the file entry!");
+
+            var xParentDirectory = (FatDirectoryEntry)aParentDirectory;
+            var xDirectoryEntryToAdd = xParentDirectory.AddDirectoryEntry(aNewDirectory, DirectoryEntryTypeEnum.Directory);
+            return xDirectoryEntryToAdd;
         }
 
-        public List<UInt64> GetFatTable(ulong firstClusterNum)
+        public override DirectoryEntry CreateFile(DirectoryEntry aParentDirectory, string aNewFile)
         {
-            var xResult = new List<UInt64>(128);
-            UInt64 xClusterNum = firstClusterNum;
+            Global.mFileSystemDebugger.SendInternal("-- FatFileSystem.CreateFile --");
+            Global.mFileSystemDebugger.SendInternal("aParentDirectory.Name =");
+            Global.mFileSystemDebugger.SendInternal(aParentDirectory?.mName);
+            Global.mFileSystemDebugger.SendInternal("aNewFile =");
+            Global.mFileSystemDebugger.SendInternal(aNewFile);
 
-            byte[] xSector = new byte[BytesPerSector];
-            UInt32? xSectorNum = null;
-
-            UInt32 xNextSectorNum;
-            UInt32 xNextSectorOffset;
-            do
+            if (aParentDirectory == null)
             {
-                GetFatTableSector(xClusterNum, out xNextSectorNum, out xNextSectorOffset);
-                if (xSectorNum.HasValue == false || xSectorNum != xNextSectorNum)
-                {
-                    ReadFatTableSector(xNextSectorNum, xSector);
-                    xSectorNum = xNextSectorNum;
-                }
+                throw new ArgumentNullException(nameof(aParentDirectory));
+            }
 
-                xResult.Add(xClusterNum);
-                xClusterNum = GetFatEntry(xSector, xClusterNum, xNextSectorOffset);
-            } while (!FatEntryIsEOF(xClusterNum));
+            if (string.IsNullOrEmpty(aNewFile))
+            {
+                throw new ArgumentNullException(nameof(aNewFile));
+            }
 
-            return xResult;
+            var xParentDirectory = (FatDirectoryEntry)aParentDirectory;
+            var xDirectoryEntryToAdd = xParentDirectory.AddDirectoryEntry(aNewFile, DirectoryEntryTypeEnum.File);
+            return xDirectoryEntryToAdd;
+        }
+
+        private enum FatTypeEnum
+        {
+            Unknown,
+
+            Fat12,
+
+            Fat16,
+
+            Fat32
         }
     }
 }

@@ -7,13 +7,10 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
     <Name>VGACompilerCrashBoot</Name>
     <BinFormat>elf</BinFormat>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.5.2</TargetFrameworkVersion>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <Profile>VMware</Profile>
-    <!-- Looks like this was a mispelled attribute. Replaced by DebugEnabled below.
-    <DebugEnable>true</DebugEnable>
-    -->
     <DebugEnabled>true</DebugEnabled>
     <DebugMode>Source</DebugMode>
     <TraceMode>User</TraceMode>

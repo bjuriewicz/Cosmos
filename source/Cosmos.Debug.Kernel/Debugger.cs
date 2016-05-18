@@ -1,13 +1,22 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 
-namespace Cosmos.Debug.Kernel {
+
+namespace Cosmos.Debug.Kernel
+{
     public class Debugger
     {
+        public string mRing { get; set; }
+
+        public string mSection { get; set; }
+
         public Debugger(string aRing, string aSection)
         {
+            mRing = aRing;
+            mSection = aSection;
         }
 
         public void Break()
@@ -18,19 +27,66 @@ namespace Cosmos.Debug.Kernel {
         {
         } // Plugged
 
-        //public void TraceOff() { } // Plugged
-        //public void TraceOn() { } // Plugged
         public void SendPtr(object aObject)
         {
         } // plugged
-
 
         internal static void DoSendNumber(uint aNumber)
         {
             // plugged
         }
 
+        internal static void DoSendNumber(int aNumber)
+        {
+            // plugged
+        }
+
+        internal static void DoSendNumber(ulong aNumber)
+        {
+            // plugged
+        }
+
+        internal static void DoSendNumber(long aNumber)
+        {
+            // plugged
+        }
+
+        internal static void DoSendNumber(float aNumber)
+        {
+            // plugged
+        }
+
+        internal static void DoSendNumber(double aNumber)
+        {
+            // plugged
+        }
+
         public void SendNumber(uint aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        public void SendNumber(int aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        public void SendNumber(ulong aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        public void SendNumber(long aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        public void SendNumber(float aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        public void SendNumber(double aNumber)
         {
             DoSendNumber(aNumber);
         }
@@ -60,7 +116,43 @@ namespace Cosmos.Debug.Kernel {
 
         public void Send(string aText)
         {
-            DoSend(aText);
+            if (aText != null)
+            {
+                DoSend(aText);
+            }
+        }
+
+        [Conditional("COSMOSDEBUG")]
+        public void SendInternal(string aText)
+        {
+            if (aText != null)
+            {
+                DoSend(aText);
+            }
+        }
+
+        [Conditional("COSMOSDEBUG")]
+        public void SendInternal(uint aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        [Conditional("COSMOSDEBUG")]
+        public void SendInternal(int aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        [Conditional("COSMOSDEBUG")]
+        public void SendInternal(ulong aNumber)
+        {
+            DoSendNumber(aNumber);
+        }
+
+        [Conditional("COSMOSDEBUG")]
+        public void SendInternal(long aNumber)
+        {
+            DoSendNumber(aNumber);
         }
 
         //public void OldSend(string aText) {
@@ -96,7 +188,8 @@ namespace Cosmos.Debug.Kernel {
         }
 
         // TODO: Kudzu repacement methods for Cosmos.HAL.DebugUtil
-        public unsafe void SendMessage(string aModule, string aData) {
+        public unsafe void SendMessage(string aModule, string aData)
+        {
             //string xSingleString;
             //xSingleString = "Message Module: \"" + aModule + "\"";
             //xSingleString += " Data: \"" + aData + "\"";
@@ -108,33 +201,39 @@ namespace Cosmos.Debug.Kernel {
             DoSend(aData);
         }
 
-        public unsafe void SendError(string aModule, string aData) {
+        public unsafe void SendError(string aModule, string aData)
+        {
             //string xSingleString;
             //xSingleString = "Error Module: \"" + aModule + "\"";
             //xSingleString += " Data: \"" + aData + "\"";
             //Send(xSingleString);
         }
 
-        public unsafe void SendNumber(string aModule, string aDescription, uint aNumber, byte aBits) {
+        public unsafe void SendNumber(string aModule, string aDescription, uint aNumber, byte aBits)
+        {
             //string xSingleString;
             //xSingleString = "Number Module: \"" + aModule + "\"";
             //xSingleString += " Description: \"" + aDescription + "\"";
             //xSingleString += " Number: \"" + CreateNumber(aNumber, aBits) + "\"";
         }
 
-        public unsafe void WriteNumber(uint aNumber, byte aBits) {
+        public unsafe void WriteNumber(uint aNumber, byte aBits)
+        {
             WriteNumber(aNumber, aBits, true);
         }
 
-        public unsafe void WriteNumber(uint aNumber, byte aBits, bool aWritePrefix) {
+        public unsafe void WriteNumber(uint aNumber, byte aBits, bool aWritePrefix)
+        {
             Send(CreateNumber(aNumber, aBits, aWritePrefix));
         }
 
-        public unsafe string CreateNumber(uint aNumber, byte aBits) {
+        public unsafe string CreateNumber(uint aNumber, byte aBits)
+        {
             return CreateNumber(aNumber, aBits, true);
         }
 
-        public unsafe string CreateNumber(uint aNumber, byte aBits, bool aWritePrefix) {
+        public unsafe string CreateNumber(uint aNumber, byte aBits, bool aWritePrefix)
+        {
             return "Cosmos.Debug.Debugger.CreateNumber(aNumber, aBits, aWritePrefix) not implemented";
             //string xNumberString = null;
             //uint xValue = aNumber;
@@ -206,11 +305,13 @@ namespace Cosmos.Debug.Kernel {
             //return xNumberString;
         }
 
-        public unsafe void WriteBinary(string aModule, string aMessage, byte[] aValue) {
+        public unsafe void WriteBinary(string aModule, string aMessage, byte[] aValue)
+        {
             WriteBinary(aModule, aMessage, aValue, 0, aValue.Length);
         }
 
-        public unsafe void WriteBinary(string aModule, string aMessage, byte[] aValue, int aIndex, int aLength) {
+        public unsafe void WriteBinary(string aModule, string aMessage, byte[] aValue, int aIndex, int aLength)
+        {
             //string xSingleString;
             //xSingleString = "Binary Module = \"" + aModule + "\"";
             //xSingleString += " Message = " + aMessage + "\"";
@@ -223,7 +324,8 @@ namespace Cosmos.Debug.Kernel {
             //Send(xSingleString);
         }
 
-        public unsafe void WriteBinary(string aModule, string aMessage, byte* aValue, int aIndex, int aLength) {
+        public unsafe void WriteBinary(string aModule, string aMessage, byte* aValue, int aIndex, int aLength)
+        {
             //string xSingleString;
             //xSingleString = "Binary Module = \"" + aModule + "\"";
             //xSingleString += " Message = " + aMessage + "\"";
@@ -236,11 +338,13 @@ namespace Cosmos.Debug.Kernel {
             //Send(xSingleString);
         }
 
-        public unsafe void ViewMemory() {
+        public unsafe void ViewMemory()
+        {
             ViewMemory(0);
         }
 
-        public unsafe void ViewMemory(int addr) {
+        public unsafe void ViewMemory(int addr)
+        {
             //while (true) {
             //    Console.Clear();
             //    Console.WriteLine();
@@ -279,13 +383,15 @@ namespace Cosmos.Debug.Kernel {
             //}
         }
 
-        private int FromHex(string p) {
+        private int FromHex(string p)
+        {
             p = p.ToLower();
             string hex = "0123456789abcdef";
 
             int ret = 0;
 
-            for (int i = 0; i < p.Length; i++) {
+            for (int i = 0; i < p.Length; i++)
+            {
                 ret = ret * 16 + hex.IndexOf(p[i]);
             }
             return ret;

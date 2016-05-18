@@ -1,12 +1,11 @@
-﻿using System;
+﻿//#define DEBUGCONNECTOR_DEBUG
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Text;
-using Cosmos.Debug.Common;
 using System.IO;
 using System.Threading;
-using System.Windows.Forms;
 
 namespace Cosmos.Debug.Common
 {
@@ -34,7 +33,10 @@ namespace Cosmos.Debug.Common
         public Action<byte, byte, byte[]> CmdChannel;
         public Action<UInt32> CmdStackCorruptionOccurred;
         public Action<UInt32> CmdNullReferenceOccurred;
-        public Action<UInt32> CmdSimpleNumber;
+        public Action<uint> CmdSimpleNumber;
+        public Action<ulong> CmdSimpleLongNumber;
+        public Action<float> CmdComplexNumber;
+        public Action<double> CmdComplexLongNumber;
         public Action<Exception> Error;
 
         protected byte mCurrentMsgType;
@@ -82,6 +84,7 @@ namespace Cosmos.Debug.Common
         {
             // even when this method doesn't do anything, DON'T REMOVE IT
             // it's used when debugging the DebugConnector, as it provides insights to what happens
+            System.Diagnostics.Debug.WriteLine(message);
         }
 
         protected void DoDebugMsg(string aMsg, bool aOnlyIfConnected)
@@ -117,17 +120,30 @@ namespace Cosmos.Debug.Common
             SetBreakpoint(aID, 0);
         }
 
-        protected UInt32 GetUInt32(byte[] aBytes, int aOffset)
+        protected ushort GetUInt16(byte[] aBytes, int aOffset)
         {
-            return (UInt32)((aBytes[aOffset + 3] << 24) | (aBytes[aOffset + 2] << 16)
-               | (aBytes[aOffset + 1] << 8) | aBytes[aOffset + 0]);
+            return BitConverter.ToUInt16(aBytes, aOffset);
         }
 
-        protected UInt16 GetUInt16(byte[] aBytes, int aOffset)
+        protected uint GetUInt32(byte[] aBytes, int aOffset)
         {
-            return (UInt16)((aBytes[aOffset + 1] << 8) | aBytes[aOffset + 0]);
+            return BitConverter.ToUInt32(aBytes, aOffset);
         }
 
+        protected ulong GetUInt64(byte[] aBytes, int aOffset)
+        {
+            return BitConverter.ToUInt64(aBytes, aOffset);
+        }
+
+        protected float GetSingle(byte[] aBytes, int aOffset)
+        {
+            return BitConverter.ToSingle(aBytes, aOffset);
+        }
+
+        protected double GetDouble(byte[] aBytes, int aOffset)
+        {
+            return BitConverter.ToDouble(aBytes, aOffset);
+        }
         protected void PacketMsg(byte[] aPacket)
         {
             mCurrentMsgType = aPacket[0];
@@ -232,6 +248,21 @@ namespace Cosmos.Debug.Common
                 case Ds2Vs.SimpleNumber:
                     DebugLog("DC Recv: SimpleNumber");
                     Next(4, PacketSimpleNumber);
+                    break;
+
+                case Ds2Vs.SimpleLongNumber:
+                    DebugLog("DC Recv: SimpleLongNumber");
+                    Next(8, PacketSimpleLongNumber);
+                    break;
+
+                case Ds2Vs.ComplexNumber:
+                    DebugLog("DC Recv: ComplexNumber");
+                    Next(4, PacketComplexNumber);
+                    break;
+
+                case Ds2Vs.ComplexLongNumber:
+                    DebugLog("DC Recv: ComplexLongNumber");
+                    Next(8, PacketComplexLongNumber);
                     break;
 
                 default:
